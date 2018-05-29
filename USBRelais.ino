@@ -20,59 +20,51 @@
 #include <avr/sleep.h>
 #include <avr/sfr_defs.h>
 #include <string.h>
+#include <Arduino.h>
 
-/*
- * Helper function for reading single bit of an integer.
- * Returns value of bit.
- */
-static inline __attribute__((always_inline))
-int hw_bitRead(unsigned int n, int bit) {
-   return ((n >> bit) & 1U);
-}
-
-/*
- * Helper function for setting single bit of an integer.
- * Returns new integer.
- */
-static inline __attribute__((always_inline))
-unsigned int hw_bitSet(unsigned int n, int bit) {
-   return (n | 1U << bit);
-}
-
-uint16_t enabled_pins = 0;
-#define enabled_pins_max  (sizeof(enabled_pins) * 8 - 1)
-
-static inline __attribute__((always_inline))
-void enable_pin(int pin) {
-   enabled_pins = hw_bitSet(enabled_pins, pin);
-}
-
-static inline __attribute__((always_inline))
-int pin_enabled(int pin) {
-   return (pin <= enabled_pins_max && hw_bitRead(enabled_pins, pin));
-}
+#include "EEPROM.h"
+#include "bitutils.h"
 
 #define CMD_ON 'O'
 #define CMD_OFF 'o'
 #define CMD_LIST 'L'
+#define CMD_RESET 'R'
 #define WAIT_TIME 5000
 
-unsigned long lastSleep;
+uint16_t enabled_pins = 0;
+uint16_t pin_states = 0;
+#define enabled_pins_max (sizeof(enabled_pins) * 8 - 1)
+
+void set_pin_state(int pin, int state) {
+   pin_states = (((EEPROM[0]) << 8 | EEPROM[1]));
+   pin_states = hw_bitWrite(pin_states, pin, state);
+   EEPROM[0] = pin_states >> 8;
+   EEPROM[1] = pin_states & 0xFF;
+   digitalWrite(pin, !state);
+}
+
+int get_pin_state(int pin) {
+   pin_states = (((EEPROM[0]) << 8 | EEPROM[1]));
+   return (pin <= enabled_pins_max && hw_bitRead(pin_states, pin));
+}
+
+void enable_pin(int pin) {
+   pinMode(pin, OUTPUT);
+   set_pin_state(pin, get_pin_state(pin));
+   enabled_pins = hw_bitSet(enabled_pins, pin);
+}
+
+int pin_enabled(int pin) {
+   return (pin <= enabled_pins_max && hw_bitRead(enabled_pins, pin));
+}
 
 void setup() {
    //turn off brown-out enable in software
    MCUCR = bit(BODS) | bit(BODSE);
    MCUCR = bit(BODS);
 
-   enable_pin(1);
-   enable_pin(2);
-   enable_pin(3);
-   enable_pin(4);
-   enable_pin(13);
-
-   for (int i = 0; i < 16; ++i)
-      if (pin_enabled(i))
-         pinMode(i, OUTPUT);
+   for (int i = 2; i <= 9; ++i)
+      enable_pin(i);
 
    Serial.begin(9600);
 }
@@ -88,49 +80,6 @@ int peek_blocking() {
 }
 
 void loop() {
-   if (millis () - lastSleep >= WAIT_TIME)
-   {
-      lastSleep = millis ();
-
-      noInterrupts ();
-
-      byte old_ADCSRA = ADCSRA;
-      // disable ADC
-      ADCSRA = 0;  
-      // pin change interrupt (example for D0)
-      PCMSK2 |= bit (PCINT16); // want pin 0
-      PCIFR  |= bit (PCIF2);   // clear any outstanding interrupts
-      PCICR  |= bit (PCIE2);   // enable pin change interrupts for D0 to D7
-
-      set_sleep_mode (SLEEP_MODE_PWR_DOWN);  
-      power_adc_disable();
-      power_spi_disable();
-      power_timer0_disable();
-      power_timer1_disable();
-      power_timer2_disable();
-      power_twi_disable();
-
-      UCSR0B &= ~bit (RXEN0);  // disable receiver
-      UCSR0B &= ~bit (TXEN0);  // disable transmitter
-
-      sleep_enable();
-      digitalWrite (13, LOW);
-      interrupts ();
-      sleep_cpu ();      
-      digitalWrite (13, HIGH);
-      sleep_disable();
-      power_all_enable();
-
-      ADCSRA = old_ADCSRA;
-      PCICR  &= ~bit (PCIE2);   // disable pin change interrupts for D0 to D7
-      UCSR0B |= bit (RXEN0);  // enable receiver
-      UCSR0B |= bit (TXEN0);  // enable transmitter
-   }  // end of time to sleep
-
-   if (Serial.available() <= 0)
-      return;
-
-   //delay(1000);
    while (read_blocking() != '@');
 
    int c = read_blocking();
@@ -140,7 +89,8 @@ void loop() {
          int pin = Serial.parseInt();
 
          if (pin_enabled(pin)) {
-            digitalWrite(pin, (c == CMD_ON));
+            set_pin_state(pin, (c == CMD_ON));
+            Serial.println("OK");
          } else {
             Serial.println("UNKNOWN PIN");
          }
@@ -154,15 +104,18 @@ void loop() {
          if (pin_enabled(i)) {
             Serial.print(i, DEC);
             Serial.print(':');
-            Serial.println(digitalRead(i));
+            Serial.println(get_pin_state(i));
          }
    }
-   else if (c == '~') {
+   else if (c == CMD_RESET) {
+      for (int i = 0; i < 16; ++i)
+         if (pin_enabled(i))
+            set_pin_state(i, 0);
+   }
+   else if (c == ' ' || c == '\n' || c == '\r')
+      ;
+   else if (c == '~')
       Serial.print('~');
-   }
-   else if (c == '\n' || c == '\r') {
-   }
-   else {
+   else
       Serial.println("UNKNOWN CMD");
-   }
 }
